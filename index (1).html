@@ -1,0 +1,458 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>彈彈的愛上遊戲系統</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    canvas {
+      border: 2px solid #1e40af;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    .animate-fade-in {
+      animation: fadeIn 0.5s ease-in;
+    }
+  </style>
+</head>
+<body class="bg-gradient-to-b from-blue-100 to-gray-200 flex flex-col items-center justify-center min-h-screen p-4">
+  <h1 class="text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-purple-600 mb-6 drop-shadow-lg">
+    彈彈的愛上遊戲系統
+  </h1>
+  <canvas id="gameCanvas" width="600" height="600"></canvas>
+  <div id="gameInfo" class="bg-white p-6 rounded-lg shadow-lg max-w-md w-full mt-4">
+    <div id="scoreDisplay" class="text-xl font-bold text-green-600 mb-2">分數: 0</div>
+    <div id="statusDisplay" class="text-lg text-gray-700 mb-2">關卡: 1 | 炸彈數量: 1 | 爆炸範圍: 1</div>
+    <button id="startButton" class="bg-blue-600 hover:bg-blue-800 text-white font-bold py-2 px-4 rounded-lg transition duration-200">
+      開始遊戲
+    </button>
+    <div id="gameOver" class="hidden text-center animate-fade-in">
+      <h2 id="gameResult" class="text-2xl font-bold text-red-600 mb-2">遊戲結束！</h2>
+      <p id="finalScore" class="text-xl text-gray-700 mb-4"></p>
+      <button id="restartButton" class="bg-green-600 hover:bg-green-800 text-white font-bold py-2 px-4 rounded-lg transition duration-200">
+        重新開始
+      </button>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const gridSize = 40;
+    const mapSize = 15;
+    const tileTypes = {
+      EMPTY: 0,
+      WALL: 1,
+      DESTRUCTIBLE: 2,
+      BOMB: 3,
+      EXPLOSION: 4,
+      EXIT: 5
+    };
+    const itemTypes = {
+      BOMB_COUNT: 'bomb_count',
+      BLAST_RANGE: 'blast_range'
+    };
+    const levels = [
+      { enemyCount: 5, wallRatio: 0.4, itemSpawnInterval: 5000, enemyMoveSpeed: 1000 },
+      { enemyCount: 5, wallRatio: 0.5, itemSpawnInterval: 6000, enemyMoveSpeed: 800 },
+      { enemyCount: 5, wallRatio: 0.6, itemSpawnInterval: 7000, enemyMoveSpeed: 600 }
+    ];
+
+    let map = [];
+    let player = { x: 1, y: 1, bombCount: 1, maxBombs: 1, blastRange: 1 };
+    let bombs = [];
+    let explosions = [];
+    let enemies = [];
+    let items = [];
+    let bloodAnimation = null;
+    let score = 0;
+    let currentLevel = 0;
+    let gameStarted = false;
+    let gameOver = false;
+    let enemyMoveInterval = null;
+    let itemSpawnInterval = null;
+
+    function initMap() {
+      map = Array(mapSize).fill().map(() => Array(mapSize).fill(tileTypes.EMPTY));
+      for (let i = 0; i < mapSize; i++) {
+        for (let j = 0; j < mapSize; j++) {
+          if (i === 0 || i === mapSize - 1 || j === 0 || j === mapSize - 1 || (i % 2 === 0 && j % 2 === 0)) {
+            map[i][j] = tileTypes.WALL;
+          } else if (Math.random() < levels[currentLevel].wallRatio && !(i === 1 && j === 1) && !(i === 14 && j === 14)) {
+            map[i][j] = tileTypes.DESTRUCTIBLE;
+          }
+        }
+      }
+      map[14][14] = tileTypes.EXIT;
+    }
+
+    function initEnemies() {
+      enemies = [];
+      let count = 0;
+      while (count < levels[currentLevel].enemyCount) {
+        const x = Math.floor(Math.random() * mapSize);
+        const y = Math.floor(Math.random() * mapSize);
+        if (map[y][x] === tileTypes.EMPTY && !(x === 1 && y === 1) && !(x === 14 && y === 14)) {
+          enemies.push({ x, y });
+          count++;
+        }
+      }
+    }
+
+    function spawnItemRandomly() {
+      if (items.length >= 2) return;
+      if (Math.random() < 0.5) {
+        let x, y;
+        do {
+          x = Math.floor(Math.random() * mapSize);
+          y = Math.floor(Math.random() * mapSize);
+        } while (
+          map[y][x] !== tileTypes.EMPTY ||
+          (x === player.x && y === player.y) ||
+          enemies.some(enemy => enemy.x === x && enemy.y === y) ||
+          items.some(item => item.x === x && item.y === y) ||
+          bombs.some(bomb => bomb.x === x && bomb.y === y) ||
+          (x === 14 && y === 14)
+        );
+        const itemType = Math.random() < 0.5 ? itemTypes.BOMB_COUNT : itemTypes.BLAST_RANGE;
+        items.push({ x, y, type: itemType, timer: 10000 });
+        setTimeout(() => {
+          items = items.filter(item => item.timer > 0 || (item.x === x && item.y === y));
+        }, 10000);
+      }
+    }
+
+    function initGame() {
+      gameStarted = true;
+      gameOver = false;
+      score = 0;
+      currentLevel = 0;
+      player = { x: 1, y: 1, bombCount: 1, maxBombs: 1, blastRange: 1 };
+      bombs = [];
+      explosions = [];
+      items = [];
+      bloodAnimation = null;
+      initMap();
+      initEnemies();
+      document.getElementById('scoreDisplay').textContent = `分數: ${score}`;
+      document.getElementById('statusDisplay').textContent = `關卡: ${currentLevel + 1} | 炸彈數量: ${player.maxBombs} | 爆炸範圍: ${player.blastRange}`;
+      document.getElementById('gameInfo').classList.remove('bg-red-100', 'bg-green-100');
+      document.getElementById('gameOver').classList.add('hidden');
+      document.getElementById('startButton').classList.add('hidden');
+      if (enemyMoveInterval) clearInterval(enemyMoveInterval);
+      if (itemSpawnInterval) clearInterval(itemSpawnInterval);
+      enemyMoveInterval = setInterval(moveEnemies, levels[currentLevel].enemyMoveSpeed);
+      itemSpawnInterval = setInterval(spawnItemRandomly, levels[currentLevel].itemSpawnInterval);
+      update();
+    }
+
+    function nextLevel() {
+      currentLevel++;
+      if (currentLevel >= levels.length) {
+        endGame(true, true);
+        return;
+      }
+      player.x = 1;
+      player.y = 1;
+      bombs = [];
+      explosions = [];
+      items = [];
+      bloodAnimation = null;
+      initMap();
+      initEnemies();
+      if (enemyMoveInterval) clearInterval(enemyMoveInterval);
+      if (itemSpawnInterval) clearInterval(itemSpawnInterval);
+      enemyMoveInterval = setInterval(moveEnemies, levels[currentLevel].enemyMoveSpeed);
+      itemSpawnInterval = setInterval(spawnItemRandomly, levels[currentLevel].itemSpawnInterval);
+      document.getElementById('statusDisplay').textContent = `關卡: ${currentLevel + 1} | 炸彈數量: ${player.maxBombs - bombs.length} | 爆炸範圍: ${player.blastRange}`;
+    }
+
+    function drawCharacter(x, y, color, isPlayer) {
+      ctx.fillStyle = color;
+      ctx.fillRect(x * gridSize, y * gridSize, gridSize, gridSize);
+      ctx.fillStyle = 'white';
+      ctx.beginPath();
+      ctx.arc(x * gridSize + gridSize * 0.3, y * gridSize + gridSize * 0.3, gridSize * 0.1, 0, Math.PI * 2);
+      ctx.arc(x * gridSize + gridSize * 0.7, y * gridSize + gridSize * 0.3, gridSize * 0.1, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'black';
+      ctx.beginPath();
+      ctx.arc(x * gridSize + gridSize * 0.3, y * gridSize + gridSize * 0.3, gridSize * 0.05, 0, Math.PI * 2);
+      ctx.arc(x * gridSize + gridSize * 0.7, y * gridSize + gridSize * 0.3, gridSize * 0.05, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = isPlayer ? 'red' : 'purple';
+      ctx.fillRect(x * gridSize + gridSize * 0.3, y * gridSize + gridSize * 0.6, gridSize * 0.4, gridSize * 0.1);
+    }
+
+    function startBloodAnimation(x, y) {
+      bloodAnimation = { x, y, radius: 0, alpha: 1, timer: 500 };
+    }
+
+    function drawBloodAnimation() {
+      if (!bloodAnimation) return;
+      ctx.save();
+      ctx.globalAlpha = bloodAnimation.alpha;
+      ctx.fillStyle = 'red';
+      ctx.beginPath();
+      ctx.arc(bloodAnimation.x * gridSize + gridSize / 2, bloodAnimation.y * gridSize + gridSize / 2, bloodAnimation.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      bloodAnimation.radius += gridSize / 20;
+      bloodAnimation.alpha -= 0.02;
+      bloodAnimation.timer -= 1000 / 60;
+      if (bloodAnimation.timer <= 0) {
+        bloodAnimation = null;
+        endGame(false, false);
+      }
+    }
+
+    function drawInstructions() {
+      if (!gameStarted || gameOver || bloodAnimation) return;
+      ctx.save();
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = 'white';
+      ctx.fillRect(10, 10, 300, 110);
+      ctx.fillStyle = '#1e40af';
+      ctx.font = '14px Arial';
+      ctx.fillText('操作：WASD/方向鍵移動，空格放置炸彈', 20, 30);
+      ctx.fillText('計分：摧毀牆壁+10，消滅敵人+100，拾取道具+50', 20, 50);
+      ctx.fillText('道具：藍色提升炸彈數量，黃色提升爆炸範圍', 20, 70);
+      ctx.fillText('過關：到右下角紫色出口，通關關卡3獲勝', 20, 90);
+      ctx.fillText('小心：避免敵人或爆炸，否則遊戲結束', 20, 110);
+      ctx.restore();
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (let i = 0; i < mapSize; i++) {
+        for (let j = 0; j < mapSize; j++) {
+          ctx.fillStyle = map[i][j] === tileTypes.WALL ? '#4b5563' : map[i][j] === tileTypes.DESTRUCTIBLE ? '#964B00' : map[i][j] === tileTypes.EXIT ? '#8b5cf6' : '#f3f4f6';
+          ctx.fillRect(j * gridSize, i * gridSize, gridSize, gridSize);
+          ctx.strokeStyle = '#d1d5db';
+          ctx.strokeRect(j * gridSize, i * gridSize, gridSize, gridSize);
+        }
+      }
+
+      bombs.forEach(bomb => {
+        ctx.fillStyle = 'red';
+        ctx.beginPath();
+        ctx.arc(bomb.x * gridSize + gridSize / 2, bomb.y * gridSize + gridSize / 2, gridSize / 3, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      explosions.forEach(explosion => {
+        explosion.tiles.forEach(tile => {
+          ctx.fillStyle = 'orange';
+          ctx.fillRect(tile.x * gridSize, tile.y * gridSize, gridSize, gridSize);
+        });
+      });
+
+      items.forEach(item => {
+        ctx.fillStyle = item.type === itemTypes.BOMB_COUNT ? 'blue' : 'yellow';
+        ctx.beginPath();
+        ctx.arc(item.x * gridSize + gridSize / 2, item.y * gridSize + gridSize / 2, gridSize / 4, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      enemies.forEach(enemy => drawCharacter(enemy.x, enemy.y, 'green', false));
+      if (!bloodAnimation) {
+        drawCharacter(player.x, player.y, 'blue', true);
+      }
+      drawBloodAnimation();
+      drawInstructions();
+    }
+
+    function canMove(x, y) {
+      return x >= 0 && x < mapSize && y >= 0 && y < mapSize && (map[y][x] === tileTypes.EMPTY || map[y][x] === tileTypes.EXIT);
+    }
+
+    function placeBomb() {
+      if (player.bombCount <= 0 || bombs.some(bomb => bomb.x === player.x && bomb.y === player.y)) return;
+      const bomb = { x: player.x, y: player.y, timer: 3000, range: player.blastRange };
+      bombs.push(bomb);
+      map[player.y][player.x] = tileTypes.BOMB;
+      player.bombCount--;
+      document.getElementById('statusDisplay').textContent = `關卡: ${currentLevel + 1} | 炸彈數量: ${player.maxBombs - bombs.length} | 爆炸範圍: ${player.blastRange}`;
+      setTimeout(() => explode(bomb), bomb.timer);
+    }
+
+    function explode(bomb) {
+      const index = bombs.indexOf(bomb);
+      if (index === -1) return;
+      bombs.splice(index, 1);
+      map[bomb.y][bomb.x] = tileTypes.EMPTY;
+      player.bombCount++;
+      document.getElementById('statusDisplay').textContent = `關卡: ${currentLevel + 1} | 炸彈數量: ${player.maxBombs - bombs.length} | 爆炸範圍: ${player.blastRange}`;
+
+      const explosionTiles = [{ x: bomb.x, y: bomb.y }];
+      const directions = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+      for (let d = 0; d < directions.length; d++) {
+        for (let i = 1; i <= bomb.range; i++) {
+          const x = bomb.x + directions[d][0] * i;
+          const y = bomb.y + directions[d][1] * i;
+          if (x < 0 || x >= mapSize || y < 0 || y >= mapSize || map[y][x] === tileTypes.WALL) break;
+          explosionTiles.push({ x, y });
+          if (map[y][x] === tileTypes.DESTRUCTIBLE) break;
+        }
+      }
+
+      explosionTiles.forEach(tile => {
+        if (map[tile.y][tile.x] === tileTypes.DESTRUCTIBLE) {
+          map[tile.y][tile.x] = tileTypes.EMPTY;
+          score += 10;
+        }
+        enemies = enemies.filter(enemy => {
+          if (enemy.x === tile.x && enemy.y === tile.y) {
+            score += 100;
+            return false;
+          }
+          return true;
+        });
+        if (tile.x === player.x && tile.y === player.y && !bloodAnimation) {
+          startBloodAnimation(player.x, player.y);
+        }
+      });
+
+      explosions.push({ tiles: explosionTiles, timer: 500 });
+      setTimeout(() => {
+        explosions = explosions.filter(exp => exp.timer > 0);
+      }, 500);
+
+      document.getElementById('scoreDisplay').textContent = `分數: ${score}`;
+      if (enemies.length === 0) {
+        endGame(true, false);
+      }
+    }
+
+    function moveEnemies() {
+      if (!gameStarted || gameOver) return;
+      enemies.forEach(enemy => {
+        const directions = [
+          { dx: 0, dy: -1 },
+          { dx: 0, dy: 1 },
+          { dx: -1, dy: 0 },
+          { dx: 1, dy: 0 }
+        ];
+        const { dx, dy } = directions[Math.floor(Math.random() * directions.length)];
+        const newX = enemy.x + dx;
+        const newY = enemy.y + dy;
+        if (canMove(newX, newY)) {
+          enemy.x = newX;
+          enemy.y = newY;
+          if (enemy.x === player.x && enemy.y === player.y && !bloodAnimation) {
+            startBloodAnimation(player.x, player.y);
+          }
+        }
+      });
+    }
+
+    function checkItems() {
+      items.forEach(item => {
+        item.timer -= 1000 / 60;
+        if (item.x === player.x && item.y === player.y) {
+          score += 50;
+          if (item.type === itemTypes.BOMB_COUNT && player.maxBombs < 3) {
+            player.maxBombs++;
+            player.bombCount++;
+          } else if (item.type === itemTypes.BLAST_RANGE && player.blastRange < 3) {
+            player.blastRange++;
+          }
+          items = items.filter(i => i !== item);
+          document.getElementById('scoreDisplay').textContent = `分數: ${score}`;
+          document.getElementById('statusDisplay').textContent = `關卡: ${currentLevel + 1} | 炸彈數量: ${player.maxBombs - bombs.length} | 爆炸範圍: ${player.blastRange}`;
+        }
+      });
+    }
+
+    function endGame(won, completedAll) {
+      gameOver = true;
+      gameStarted = false;
+      if (enemyMoveInterval) clearInterval(enemyMoveInterval);
+      if (itemSpawnInterval) clearInterval(itemSpawnInterval);
+      document.getElementById('gameInfo').classList.add(completedAll ? 'bg-green-100' : won ? 'bg-green-100' : 'bg-red-100');
+      document.getElementById('gameOver').classList.remove('hidden');
+      document.getElementById('gameResult').textContent = completedAll ? '恭喜通關！' : won ? '恭喜過關！' : '遊戲結束！';
+      document.getElementById('gameResult').classList.remove('text-red-600', 'text-green-600');
+      document.getElementById('gameResult').classList.add(completedAll || won ? 'text-green-600' : 'text-red-600');
+      document.getElementById('finalScore').textContent = `最終分數: ${score}`;
+    }
+
+    function update() {
+      if (!gameStarted || gameOver) return;
+      explosions.forEach(exp => exp.timer -= 1000 / 60);
+      items.forEach(item => item.timer -= 1000 / 60);
+      checkItems();
+      if (player.x === 14 && player.y === 14 && !bloodAnimation) {
+        nextLevel();
+      }
+      draw();
+      requestAnimationFrame(update);
+    }
+
+    document.addEventListener('keydown', e => {
+      if (!gameStarted || gameOver || bloodAnimation) return;
+      let newX = player.x;
+      let newY = player.y;
+      if (e.key === 'w' || e.key === 'ArrowUp') newY--;
+      if (e.key === 's' || e.key === 'ArrowDown') newY++;
+      if (e.key === 'a' || e.key === 'ArrowLeft') newX--;
+      if (e.key === 'd' || e.key === 'ArrowRight') newX++;
+      if (e.key === ' ') placeBomb();
+      if (canMove(newX, newY)) {
+        player.x = newX;
+        player.y = newY;
+        if (enemies.some(enemy => enemy.x === player.x && enemy.y === player.y) && !bloodAnimation) {
+          startBloodAnimation(player.x, player.y);
+        }
+      }
+    });
+
+    document.getElementById('startButton').addEventListener('click', initGame);
+    document.getElementById('restartButton').addEventListener('click', initGame);
+  </script>
+</body>
+</html>
